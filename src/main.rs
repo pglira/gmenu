@@ -8,7 +8,7 @@ mod window;
 use anyhow::Result;
 use clap::Parser;
 use std::io::{Read, Write};
-use x11rb::protocol::xproto::KeyButMask;
+use x11rb::protocol::xproto::{ConnectionExt as _, KeyButMask, NotifyMode};
 use x11rb::protocol::Event;
 
 use crate::config::Config;
@@ -106,6 +106,22 @@ fn main() -> Result<()> {
     let mut renderer = Renderer::new(width as i32, height as i32, &theme);
     let keymap = Keymap::fetch(&win.conn)?;
 
+    // If the user is still holding any non-modifier key when we grab the
+    // keyboard (common when launched via WM hotkey), swallow the next press
+    // of those keys so a stale Return doesn't immediately select+exit.
+    let mut swallow_keycodes: Vec<u8> = {
+        let r = win.conn.query_keymap()?.reply()?;
+        let mut held = Vec::new();
+        for (byte, b) in r.keys.iter().enumerate() {
+            for bit in 0..8 {
+                if b & (1 << bit) != 0 {
+                    held.push((byte * 8 + bit) as u8);
+                }
+            }
+        }
+        held
+    };
+
     let mut needs_repaint = true;
 
     loop {
@@ -129,7 +145,16 @@ fn main() -> Result<()> {
         let event = win.next_event()?;
         match event {
             Event::Expose(_) => { needs_repaint = true; }
+            Event::KeyRelease(ev) => {
+                swallow_keycodes.retain(|&kc| kc != ev.detail);
+            }
             Event::KeyPress(ev) => {
+                if let Some(pos) = swallow_keycodes.iter().position(|&kc| kc == ev.detail) {
+                    // Held-on-launch keypress (likely autorepeat). Drop one,
+                    // and on the next press of this key let it through.
+                    swallow_keycodes.swap_remove(pos);
+                    continue;
+                }
                 let state = u16::from(ev.state);
                 let ctrl = (state & u16::from(KeyButMask::CONTROL)) != 0;
                 let shift = (state & u16::from(KeyButMask::SHIFT)) != 0;
@@ -236,8 +261,15 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            Event::FocusOut(_) => {
-                std::process::exit(1);
+            Event::FocusOut(ev) => {
+                // Only treat genuine user-driven focus loss as "exit". X11
+                // generates FocusOut events with non-Normal modes during grab
+                // transitions (NotifyGrab/Ungrab/WhileGrabbed) — when launched
+                // via a WM hotkey, these can fire just after our window maps
+                // and would otherwise close gmenu before the user sees it.
+                if ev.mode == NotifyMode::NORMAL {
+                    std::process::exit(1);
+                }
             }
             _ => {}
         }

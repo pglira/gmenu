@@ -54,6 +54,7 @@ impl Window {
             .event_mask(
                 EventMask::EXPOSURE
                     | EventMask::KEY_PRESS
+                    | EventMask::KEY_RELEASE
                     | EventMask::STRUCTURE_NOTIFY
                     | EventMask::FOCUS_CHANGE,
             );
