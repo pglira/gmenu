@@ -57,31 +57,31 @@ impl Filter {
             && needle_owned.len() >= self.query.len()
             && needle_owned.starts_with(&self.query);
 
-        let new_matches: Vec<u32> = if extends {
+        // Collect (match_position, item_index). Lower match_position = better
+        // rank; original input order breaks ties.
+        let scored: Vec<(u32, u32)> = if extends {
             self.matches
                 .par_iter()
                 .copied()
-                .filter(|&i| finder.find(haystacks[i as usize].as_bytes()).is_some())
+                .filter_map(|i| {
+                    finder
+                        .find(haystacks[i as usize].as_bytes())
+                        .map(|p| (p as u32, i))
+                })
                 .take_any(cap)
                 .collect()
         } else {
             haystacks
                 .par_iter()
                 .enumerate()
-                .filter_map(|(i, s)| {
-                    if finder.find(s.as_bytes()).is_some() {
-                        Some(i as u32)
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(|(i, s)| finder.find(s.as_bytes()).map(|p| (p as u32, i as u32)))
                 .take_any(cap)
                 .collect()
         };
 
-        // take_any does not preserve order; restore stable order by index.
-        let mut new_matches = new_matches;
-        new_matches.sort_unstable();
+        let mut scored = scored;
+        scored.sort_unstable_by_key(|&(pos, idx)| (pos, idx));
+        let new_matches: Vec<u32> = scored.into_iter().map(|(_, i)| i).collect();
 
         self.matches = new_matches;
         self.query = if self.case_sensitive { new_query.to_string() } else { new_query.to_lowercase() };
@@ -161,6 +161,25 @@ mod tests {
         assert_eq!(f.matches, vec![0, 1, 3]);
         f.update(&items, "alph");
         assert_eq!(f.matches, vec![0, 1]);
+    }
+
+    #[test]
+    fn prefix_matches_rank_first() {
+        let items = Items::new(
+            vec![
+                "do-youtube".into(),  // match at pos 3
+                "youtube".into(),     // match at pos 0
+                "you-med".into(),     // match at pos 0
+                "see-you".into(),     // match at pos 4
+            ],
+            false,
+        );
+        let mut f = Filter::new(false, 100);
+        f.update(&items, "you");
+        // youtube (1) and you-med (2) both at pos 0; tie-break by input
+        // order, so 1 then 2. Then see-you (3) at pos 4, then do-youtube
+        // (0) at pos 3.
+        assert_eq!(f.matches, vec![1, 2, 0, 3]);
     }
 
     #[test]
