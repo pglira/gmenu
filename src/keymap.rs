@@ -28,6 +28,7 @@ pub enum Key {
     End,
     PageUp,
     PageDown,
+    Insert,
     Other,
 }
 
@@ -84,6 +85,7 @@ fn keysym_to_key(sym: u32) -> Key {
         0xff57 => Key::End,
         0xff55 => Key::PageUp,
         0xff56 => Key::PageDown,
+        0xff63 => Key::Insert,
         s if (0x20..0x7f).contains(&s) => Key::Char(char::from(s as u8)),
         s if (0xa0..0x100).contains(&s) => Key::Char(char::from(s as u8)),
         // Direct Unicode encoding: keysym 0x01000000 + ucs codepoint

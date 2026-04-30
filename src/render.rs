@@ -1,4 +1,5 @@
 use crate::filter::{match_spans, Filter, Items};
+use crate::input::Input;
 use cairo::{Context, Format, ImageSurface};
 use pango::{EllipsizeMode, FontDescription, Layout};
 
@@ -76,12 +77,13 @@ impl Renderer {
         &self,
         items: &Items,
         filter: &Filter,
-        query: &str,
+        input: &Input,
         cursor: usize,
         scroll: usize,
         case_sensitive: bool,
         theme: &Theme,
     ) {
+        let query = input.text.as_str();
         let ctx = Context::new(&self.surface).expect("cairo ctx");
         let ctx = &ctx;
         // bg
@@ -114,9 +116,41 @@ impl Renderer {
             format!("<b>{}</b> {}", prompt_esc, query_esc)
         };
         input_layout.set_markup(&markup);
+
+        // Byte offset within the layout text (markup-stripped) where the
+        // query begins. Used to translate caret/selection positions.
+        let query_offset = if theme.prompt.is_empty() { 0 } else { theme.prompt.len() + 1 };
+
+        // Selection rectangle (under text)
+        if let Some((s, e)) = input.selection() {
+            if let Some(line) = input_layout.line_readonly(0) {
+                let sx = line.index_to_x((query_offset + s) as i32, false) / pango::SCALE;
+                let ex = line.index_to_x((query_offset + e) as i32, false) / pango::SCALE;
+                set_color(ctx, theme.selbg);
+                ctx.rectangle(
+                    pad_x + sx as f64,
+                    input_top + 2.0,
+                    (ex - sx) as f64,
+                    input_h - 4.0,
+                );
+                ctx.fill().unwrap();
+            }
+        }
+
         set_color(ctx, theme.fg);
         ctx.move_to(pad_x, input_text_y);
         pangocairo::functions::show_layout(ctx, &input_layout);
+
+        // Caret (vertical bar) — drawn on top of text
+        if let Some(line) = input_layout.line_readonly(0) {
+            let cx = line.index_to_x((query_offset + input.caret) as i32, false) / pango::SCALE;
+            set_color(ctx, theme.fg);
+            ctx.set_line_width(1.0);
+            let x = (pad_x + cx as f64).round() + 0.5;
+            ctx.move_to(x, input_top + 3.0);
+            ctx.line_to(x, input_top + input_h - 3.0);
+            ctx.stroke().unwrap();
+        }
 
         // Counter (right side): "n/total"
         let total = items.len();

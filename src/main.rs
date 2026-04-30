@@ -1,5 +1,6 @@
 mod config;
 mod filter;
+mod input;
 mod keymap;
 mod render;
 mod window;
@@ -7,12 +8,14 @@ mod window;
 use anyhow::Result;
 use clap::Parser;
 use std::io::{Read, Write};
+use x11rb::protocol::xproto::KeyButMask;
 use x11rb::protocol::Event;
 
 use crate::config::Config;
 use crate::filter::{Filter, Items};
+use crate::input::Input;
 use crate::keymap::{Key, Keymap};
-use crate::render::{Renderer};
+use crate::render::Renderer;
 use crate::window::Window;
 
 /// Per-invocation flags. Visual styling lives in
@@ -36,16 +39,13 @@ struct Cli {
 fn read_stdin_lines() -> Result<Vec<String>> {
     let mut buf = String::new();
     std::io::stdin().lock().read_to_string(&mut buf)?;
-    let mut out: Vec<String> = buf.lines().map(|s| s.to_string()).collect();
-    // Drop trailing empty line if input ended with \n (already handled by .lines())
-    let _ = &mut out;
-    Ok(out)
+    Ok(buf.lines().map(|s| s.to_string()).collect())
 }
 
 struct App {
     items: Items,
     filter: Filter,
-    query: String,
+    input: Input,
     cursor: usize, // index into matches
     scroll: usize,
 }
@@ -54,11 +54,11 @@ impl App {
     fn new(items: Items, max_matches: usize, case_sensitive: bool) -> Self {
         let mut filter = Filter::new(case_sensitive, max_matches);
         filter.update(&items, "");
-        Self { items, filter, query: String::new(), cursor: 0, scroll: 0 }
+        Self { items, filter, input: Input::new(), cursor: 0, scroll: 0 }
     }
 
     fn refilter(&mut self) {
-        self.filter.update(&self.items, &self.query);
+        self.filter.update(&self.items, &self.input.text);
         if self.cursor >= self.filter.matches.len() {
             self.cursor = self.filter.matches.len().saturating_sub(1);
         }
@@ -72,7 +72,6 @@ impl App {
         } else if self.cursor >= self.scroll + visible {
             self.scroll = self.cursor + 1 - visible;
         }
-        // Clamp
         let max_scroll = self.filter.matches.len().saturating_sub(visible);
         if self.scroll > max_scroll { self.scroll = max_scroll; }
     }
@@ -115,7 +114,7 @@ fn main() -> Result<()> {
             renderer.draw(
                 &app.items,
                 &app.filter,
-                &app.query,
+                &app.input,
                 app.cursor,
                 app.scroll,
                 cli.case_sensitive,
@@ -131,35 +130,56 @@ fn main() -> Result<()> {
         match event {
             Event::Expose(_) => { needs_repaint = true; }
             Event::KeyPress(ev) => {
+                let state = u16::from(ev.state);
+                let ctrl = (state & u16::from(KeyButMask::CONTROL)) != 0;
+                let shift = (state & u16::from(KeyButMask::SHIFT)) != 0;
                 let key = keymap.lookup(ev.detail, ev.state.into());
-                let ctrl = (u16::from(ev.state) & u16::from(x11rb::protocol::xproto::KeyButMask::CONTROL)) != 0;
+                let mut text_changed = false;
                 match key {
-                    Key::Escape => {
-                        std::process::exit(1);
-                    }
+                    Key::Escape => std::process::exit(1),
                     Key::Return => {
+                        let mut out = std::io::stdout().lock();
                         if let Some(sel) = app.selected() {
-                            let mut out = std::io::stdout().lock();
                             writeln!(out, "{}", sel)?;
-                        } else if !app.query.is_empty() {
-                            // No match: print the query (dmenu-ish behavior)
-                            let mut out = std::io::stdout().lock();
-                            writeln!(out, "{}", app.query)?;
+                        } else if !app.input.text.is_empty() {
+                            writeln!(out, "{}", app.input.text)?;
                         }
                         return Ok(());
                     }
                     Key::Backspace => {
+                        app.input.delete_left(ctrl);
+                        text_changed = true;
+                    }
+                    Key::Delete => {
+                        app.input.delete_right(ctrl);
+                        text_changed = true;
+                    }
+                    Key::Left => {
+                        if ctrl { app.input.move_word_left(shift); }
+                        else { app.input.move_left(shift); }
+                        needs_repaint = true;
+                    }
+                    Key::Right => {
+                        if ctrl { app.input.move_word_right(shift); }
+                        else { app.input.move_right(shift); }
+                        needs_repaint = true;
+                    }
+                    Key::Home => {
                         if ctrl {
-                            // Word delete
-                            while app.query.pop().is_some_and(|c| c.is_whitespace()) {}
-                            while let Some(c) = app.query.chars().last() {
-                                if c.is_whitespace() { break; }
-                                app.query.pop();
-                            }
+                            app.cursor = 0;
+                            app.adjust_scroll(renderer.visible_rows);
                         } else {
-                            app.query.pop();
+                            app.input.move_home(shift);
                         }
-                        app.refilter();
+                        needs_repaint = true;
+                    }
+                    Key::End => {
+                        if ctrl {
+                            app.cursor = app.filter.matches.len().saturating_sub(1);
+                            app.adjust_scroll(renderer.visible_rows);
+                        } else {
+                            app.input.move_end(shift);
+                        }
                         needs_repaint = true;
                     }
                     Key::Up => { app.move_cursor(-1, renderer.visible_rows); needs_repaint = true; }
@@ -167,44 +187,59 @@ fn main() -> Result<()> {
                     Key::Tab => { app.move_cursor(1, renderer.visible_rows); needs_repaint = true; }
                     Key::PageUp => { app.move_cursor(-(renderer.visible_rows as isize), renderer.visible_rows); needs_repaint = true; }
                     Key::PageDown => { app.move_cursor(renderer.visible_rows as isize, renderer.visible_rows); needs_repaint = true; }
-                    Key::Home => { app.cursor = 0; app.adjust_scroll(renderer.visible_rows); needs_repaint = true; }
-                    Key::End => {
-                        let n = app.filter.matches.len();
-                        app.cursor = n.saturating_sub(1);
-                        app.adjust_scroll(renderer.visible_rows);
-                        needs_repaint = true;
+                    Key::Insert if shift => {
+                        win.request_paste(win.atom_primary, ev.time)?;
                     }
                     Key::Char(c) => {
                         if ctrl {
                             match c.to_ascii_lowercase() {
-                                'l' => { app.query.clear(); app.refilter(); needs_repaint = true; }
-                                'w' => {
-                                    while app.query.pop().is_some_and(|x| x.is_whitespace()) {}
-                                    while let Some(c) = app.query.chars().last() {
-                                        if c.is_whitespace() { break; }
-                                        app.query.pop();
-                                    }
-                                    app.refilter(); needs_repaint = true;
+                                'a' => { app.input.select_all(); needs_repaint = true; }
+                                'c' | 'x' => { /* copy/cut not implemented in v1 */ }
+                                'v' => { win.request_paste(win.atom_clipboard, ev.time)?; }
+                                'l' => { app.input.clear(); text_changed = true; }
+                                'u' => {
+                                    // Delete from caret to start of line
+                                    let caret = app.input.caret;
+                                    app.input.text.replace_range(..caret, "");
+                                    app.input.caret = 0;
+                                    app.input.clear_selection();
+                                    text_changed = true;
                                 }
+                                'w' => { app.input.delete_left(true); text_changed = true; }
                                 'k' | 'p' => { app.move_cursor(-1, renderer.visible_rows); needs_repaint = true; }
                                 'j' | 'n' => { app.move_cursor(1, renderer.visible_rows); needs_repaint = true; }
+                                'e' => { app.input.move_end(shift); needs_repaint = true; }
                                 _ => {}
                             }
                         } else if !c.is_control() {
-                            app.query.push(c);
-                            app.refilter();
-                            needs_repaint = true;
+                            app.input.insert_char(c);
+                            text_changed = true;
                         }
                     }
                     _ => {}
                 }
+                if text_changed {
+                    app.refilter();
+                    needs_repaint = true;
+                }
+            }
+            Event::SelectionNotify(ev) => {
+                if ev.property != 0 && ev.property == win.atom_paste_prop {
+                    if let Some(text) = win.read_pasted()? {
+                        // Strip newlines so multi-line pastes don't break the input
+                        let cleaned: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+                        if !cleaned.is_empty() {
+                            app.input.insert_str(&cleaned);
+                            app.refilter();
+                            needs_repaint = true;
+                        }
+                    }
+                }
             }
             Event::FocusOut(_) => {
-                // Lost focus to another window: exit, mimicking dmenu.
                 std::process::exit(1);
             }
             _ => {}
         }
     }
 }
-

@@ -26,6 +26,10 @@ pub struct Window {
     pub h: u16,
     pub depth: u8,
     pub byte_order: XImageOrder,
+    pub atom_clipboard: u32,
+    pub atom_primary: u32,
+    pub atom_utf8: u32,
+    pub atom_paste_prop: u32,
 }
 
 impl Window {
@@ -89,6 +93,10 @@ impl Window {
             return Err(anyhow!("could not grab keyboard"));
         }
 
+        let atom_clipboard = conn.intern_atom(false, b"CLIPBOARD")?.reply()?.atom;
+        let atom_utf8 = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
+        let atom_paste_prop = conn.intern_atom(false, b"GMENU_PASTE")?.reply()?.atom;
+
         Ok(Self {
             conn,
             screen_num,
@@ -98,7 +106,43 @@ impl Window {
             h: height,
             depth,
             byte_order: setup.image_byte_order.try_into().unwrap_or(XImageOrder::LsbFirst),
+            atom_clipboard,
+            atom_primary: u32::from(AtomEnum::PRIMARY),
+            atom_utf8,
+            atom_paste_prop,
         })
+    }
+
+    /// Asynchronously request the contents of an X11 selection. The result
+    /// arrives later as a `SelectionNotify` event; call [`Self::read_pasted`]
+    /// when that event matches our paste property.
+    pub fn request_paste(&self, selection: u32, time: u32) -> Result<()> {
+        self.conn.convert_selection(
+            self.win,
+            selection,
+            self.atom_utf8,
+            self.atom_paste_prop,
+            time,
+        )?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Read the property where pasted bytes were stored and delete it.
+    /// Returns `None` if the selection owner declined or the bytes aren't UTF-8.
+    pub fn read_pasted(&self) -> Result<Option<String>> {
+        let r = self.conn.get_property(
+            true, // delete after read
+            self.win,
+            self.atom_paste_prop,
+            u32::from(AtomEnum::ANY),
+            0,
+            u32::MAX / 4,
+        )?.reply()?;
+        if r.value_len == 0 || r.type_ == 0 {
+            return Ok(None);
+        }
+        Ok(String::from_utf8(r.value).ok())
     }
 
     /// Send the given pre-rendered ARGB/Rgb24 buffer (Cairo `Format::Rgb24`,
