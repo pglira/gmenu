@@ -1,0 +1,21 @@
+# Copy to ~/.config/gmenu/config.toml
+# All keys are optional; missing keys fall back to built-in defaults.
+
+font = "PragmataPro 12"
+
+bg      = "#222222"
+fg      = "#dddddd"
+selbg   = "#005577"
+selfg   = "#ffffff"
+matchbg = "#3b3b00"
+matchfg = "#ffff66"
+
+border       = "#888888"
+border_width = 2
+
+width  = 700
+height = 420
+
+padding_x     = 10  # left/right inset for content
+padding_y     = 6   # top/bottom inset for content
+row_padding_y = 6   # extra vertical space per item row
