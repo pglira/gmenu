@@ -92,14 +92,30 @@ impl Renderer {
         let pad_x = theme.padding_x as f64 + bw;
         let pad_y = theme.padding_y as f64 + bw;
 
-        // Vertical centering offset within a row
+        // Vertical centering offset within a list row
         let text_y_off = ((self.row_height - self.text_height) / 2).max(0) as f64;
 
-        // Input row
-        let input_text = format!("{}{}", theme.prompt, query);
-        let input_layout = self.layout_for(ctx, &input_text);
+        // The input region runs from the border edge down to the separator;
+        // it's taller than a list row by `padding_y`, so center text within
+        // that full region rather than reusing the list-row offset.
+        let sep_y = pad_y + self.row_height as f64;
+        let input_top = bw;
+        let input_h = sep_y - input_top;
+        let input_text_y = input_top + ((input_h - self.text_height as f64) / 2.0).max(0.0);
+
+        // Input row: prompt (bold) + query, on the same line.
+        let input_layout = pangocairo::functions::create_layout(ctx);
+        input_layout.set_font_description(Some(&self.fd));
+        let prompt_esc = pango::glib::markup_escape_text(&theme.prompt);
+        let query_esc = pango::glib::markup_escape_text(query);
+        let markup = if theme.prompt.is_empty() {
+            query_esc.to_string()
+        } else {
+            format!("<b>{}</b> {}", prompt_esc, query_esc)
+        };
+        input_layout.set_markup(&markup);
         set_color(ctx, theme.fg);
-        ctx.move_to(pad_x, pad_y + text_y_off);
+        ctx.move_to(pad_x, input_text_y);
         pangocairo::functions::show_layout(ctx, &input_layout);
 
         // Counter (right side): "n/total"
@@ -113,11 +129,8 @@ impl Renderer {
         let cl = self.layout_for(ctx, &counter);
         let (cw_pu, _) = cl.size();
         let cw = cw_pu / pango::SCALE;
-        ctx.move_to((self.w as f64) - pad_x - cw as f64, pad_y + text_y_off);
+        ctx.move_to((self.w as f64) - pad_x - cw as f64, input_text_y);
         pangocairo::functions::show_layout(ctx, &cl);
-
-        // Separator under input
-        let sep_y = pad_y + self.row_height as f64;
         set_color(ctx, theme.fg);
         ctx.set_line_width(1.0);
         ctx.move_to(bw, sep_y);
