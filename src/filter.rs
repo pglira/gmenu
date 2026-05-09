@@ -33,48 +33,57 @@ impl Filter {
         Self { query: String::new(), matches: Vec::new(), case_sensitive, cap }
     }
 
-    /// Recompute `matches`. Uses incremental refinement when the new query
-    /// extends the previous one (only re-scan previous matches).
+    /// Recompute `matches`. Splits `new_query` on whitespace; an item matches
+    /// iff every token appears (substring) in the item. Ranking uses the
+    /// earliest token match position. Uses incremental refinement when the
+    /// new query extends the previous one (only re-scan previous matches).
     pub fn update(&mut self, items: &Items, new_query: &str) {
-        if new_query.is_empty() {
+        let normalized: String = if self.case_sensitive {
+            new_query.to_string()
+        } else {
+            new_query.to_lowercase()
+        };
+        let tokens: Vec<&str> = normalized.split_whitespace().collect();
+
+        if tokens.is_empty() {
             let n = items.len().min(self.cap);
             self.matches = (0..n as u32).collect();
             self.query.clear();
             return;
         }
 
-        let needle_owned: String = if self.case_sensitive {
-            new_query.to_string()
-        } else {
-            new_query.to_lowercase()
-        };
-        let finder = memmem::Finder::new(needle_owned.as_bytes());
+        let finders: Vec<memmem::Finder> =
+            tokens.iter().map(|t| memmem::Finder::new(t.as_bytes())).collect();
 
         let haystacks: &[String] = if self.case_sensitive { &items.raw } else { &items.lower };
         let cap = self.cap;
 
-        let extends = !self.query.is_empty()
-            && needle_owned.len() >= self.query.len()
-            && needle_owned.starts_with(&self.query);
+        // Extends iff the new (normalized) query is a textual extension of the
+        // old. With token-AND semantics this guarantees every old required
+        // token still appears in some new token, so new matches ⊆ old matches.
+        let extends = !self.query.is_empty() && normalized.starts_with(&self.query);
 
-        // Collect (match_position, item_index). Lower match_position = better
-        // rank; original input order breaks ties.
+        let score = |bytes: &[u8]| -> Option<u32> {
+            let mut min_pos = u32::MAX;
+            for f in &finders {
+                let p = f.find(bytes)?;
+                if (p as u32) < min_pos { min_pos = p as u32; }
+            }
+            Some(min_pos)
+        };
+
         let scored: Vec<(u32, u32)> = if extends {
             self.matches
                 .par_iter()
                 .copied()
-                .filter_map(|i| {
-                    finder
-                        .find(haystacks[i as usize].as_bytes())
-                        .map(|p| (p as u32, i))
-                })
+                .filter_map(|i| score(haystacks[i as usize].as_bytes()).map(|p| (p, i)))
                 .take_any(cap)
                 .collect()
         } else {
             haystacks
                 .par_iter()
                 .enumerate()
-                .filter_map(|(i, s)| finder.find(s.as_bytes()).map(|p| (p as u32, i as u32)))
+                .filter_map(|(i, s)| score(s.as_bytes()).map(|p| (p, i as u32)))
                 .take_any(cap)
                 .collect()
         };
@@ -84,48 +93,62 @@ impl Filter {
         let new_matches: Vec<u32> = scored.into_iter().map(|(_, i)| i).collect();
 
         self.matches = new_matches;
-        self.query = if self.case_sensitive { new_query.to_string() } else { new_query.to_lowercase() };
+        self.query = normalized;
     }
 }
 
-/// Find all byte-offset spans in `haystack` that match `needle`.
-/// Returned spans are non-overlapping. Empty needle returns no spans.
-pub fn match_spans(haystack: &str, needle: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
-    if needle.is_empty() {
+/// Find all byte-offset spans in `haystack` that match any whitespace-split
+/// token in `query`. Returned spans are sorted and merged (overlaps and
+/// touches collapse into a single span). Empty query returns no spans.
+pub fn match_spans(haystack: &str, query: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
+    if query.split_whitespace().next().is_none() {
         return Vec::new();
     }
-    let mut out = Vec::new();
-    if case_sensitive {
-        let finder = memmem::Finder::new(needle.as_bytes());
-        let mut start = 0;
-        while let Some(p) = finder.find(&haystack.as_bytes()[start..]) {
-            let s = start + p;
-            let e = s + needle.len();
-            out.push((s, e));
-            start = e;
-        }
+    // For case-insensitive matching we scan against a lowercased copy of the
+    // haystack but emit byte offsets that index into the original. This only
+    // works when lowercasing is length-preserving (always true for ASCII;
+    // breaks for some non-ASCII chars — give up on highlighting in that case).
+    let lower_haystack;
+    let scan: &str = if case_sensitive {
+        haystack
     } else {
-        // Match by walking lowercased copies. Byte positions match because
-        // ASCII case mapping preserves length; for non-ASCII we fall back
-        // to scanning the lowercased string and mapping byte indices via
-        // the original char_indices. To keep the highlight in the *original*
-        // bytes we scan the raw bytes after locating the offset in lower.
-        let lh = haystack.to_lowercase();
-        let ln = needle.to_lowercase();
-        // Length-preserving check; if not, give up on highlighting.
-        if lh.len() != haystack.len() {
+        lower_haystack = haystack.to_lowercase();
+        if lower_haystack.len() != haystack.len() {
             return Vec::new();
         }
-        let finder = memmem::Finder::new(ln.as_bytes());
+        &lower_haystack
+    };
+    let lower_query;
+    let query_norm: &str = if case_sensitive {
+        query
+    } else {
+        lower_query = query.to_lowercase();
+        &lower_query
+    };
+
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for tok in query_norm.split_whitespace() {
+        let finder = memmem::Finder::new(tok.as_bytes());
         let mut start = 0;
-        while let Some(p) = finder.find(&lh.as_bytes()[start..]) {
+        while let Some(p) = finder.find(&scan.as_bytes()[start..]) {
             let s = start + p;
-            let e = s + ln.len();
-            out.push((s, e));
+            let e = s + tok.len();
+            spans.push((s, e));
             start = e;
         }
     }
-    out
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (s, e) in spans {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+    merged
 }
 
 #[cfg(test)]
@@ -186,5 +209,41 @@ mod tests {
     fn spans_basic() {
         assert_eq!(match_spans("FooBarFoo", "foo", false), vec![(0, 3), (6, 9)]);
         assert_eq!(match_spans("abc", "", false), Vec::<(usize,usize)>::new());
+    }
+
+    #[test]
+    fn multitoken_and_match() {
+        let items = Items::new(
+            vec![
+                "git-sla".into(),
+                "git-only".into(),
+                "do-git-sla".into(),
+                "sla-only".into(),
+            ],
+            false,
+        );
+        let mut f = Filter::new(false, 100);
+        f.update(&items, "git sla");
+        // git-sla matches at pos 0; do-git-sla matches at pos 3 (token "git").
+        assert_eq!(f.matches, vec![0, 2]);
+    }
+
+    #[test]
+    fn multitoken_order_independent() {
+        let items = Items::new(vec!["git-sla".into(), "sla-git".into()], false);
+        let mut f = Filter::new(false, 100);
+        f.update(&items, "sla git");
+        assert_eq!(f.matches, vec![0, 1]);
+    }
+
+    #[test]
+    fn multitoken_spans_merged() {
+        // "git sla" against "git-sla" -> two adjacent spans (0,3) and (4,7)
+        // (the dash sits between them so they don't merge).
+        let s = match_spans("git-sla", "git sla", false);
+        assert_eq!(s, vec![(0, 3), (4, 7)]);
+        // Overlapping example: tokens "ab" and "bc" against "abc" -> merged.
+        let s = match_spans("abc", "ab bc", false);
+        assert_eq!(s, vec![(0, 3)]);
     }
 }
