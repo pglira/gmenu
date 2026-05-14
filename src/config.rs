@@ -21,6 +21,7 @@ pub struct Config {
     pub padding_x: Option<i32>,
     pub padding_y: Option<i32>,
     pub row_padding_y: Option<i32>,
+    pub opacity: Option<f64>,
 }
 
 const DEF_FONT: &str = "Sans 12";
@@ -37,6 +38,7 @@ const DEF_HEIGHT: u16 = 420;
 const DEF_PAD_X: i32 = 10;
 const DEF_PAD_Y: i32 = 6;
 const DEF_ROW_PAD_Y: i32 = 6;
+const DEF_OPACITY: f64 = 1.0;
 
 impl Config {
     /// Load config from `$XDG_CONFIG_HOME/gmenu/config.toml` (or `~/.config/...`).
@@ -78,6 +80,7 @@ impl Config {
 
     pub fn width(&self) -> u16 { self.width.unwrap_or(DEF_WIDTH) }
     pub fn height(&self) -> u16 { self.height.unwrap_or(DEF_HEIGHT) }
+    pub fn opacity(&self) -> f64 { self.opacity.unwrap_or(DEF_OPACITY).clamp(0.0, 1.0) }
 }
 
 pub fn config_path() -> Option<PathBuf> {

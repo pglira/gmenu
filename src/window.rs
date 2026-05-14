@@ -33,7 +33,7 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn open(width: u16, height: u16, bg_pixel: u32) -> Result<Self> {
+    pub fn open(width: u16, height: u16, bg_pixel: u32, opacity: f64) -> Result<Self> {
         let (conn, screen_num) = RustConnection::connect(None).context("X11 connect")?;
         let setup = conn.setup().clone();
         let screen = &setup.roots[screen_num];
@@ -73,6 +73,7 @@ impl Window {
         set_window_type_dialog(&conn, win)?;
         set_wm_class(&conn, win, "gmenu", "gmenu")?;
         set_wm_name(&conn, win, "gmenu")?;
+        set_window_opacity(&conn, win, opacity)?;
 
         let gc = conn.generate_id()?;
         conn.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
@@ -221,6 +222,22 @@ fn set_wm_class(conn: &RustConnection, win: u32, instance: &str, class: &str) ->
         AtomEnum::WM_CLASS,
         AtomEnum::STRING,
         &data,
+    )?;
+    Ok(())
+}
+
+fn set_window_opacity(conn: &RustConnection, win: u32, opacity: f64) -> Result<()> {
+    // _NET_WM_WINDOW_OPACITY: a 32-bit value where 0xFFFFFFFF means fully
+    // opaque and 0 means fully transparent. Requires a running compositor.
+    let opacity = opacity.clamp(0.0, 1.0);
+    let value = (opacity * u32::MAX as f64).round() as u32;
+    let atom = conn.intern_atom(false, b"_NET_WM_WINDOW_OPACITY")?.reply()?.atom;
+    conn.change_property32(
+        PropMode::REPLACE,
+        win,
+        atom,
+        AtomEnum::CARDINAL,
+        &[value],
     )?;
     Ok(())
 }

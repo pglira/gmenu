@@ -19,3 +19,5 @@ height = 420
 padding_x     = 10  # left/right inset for content
 padding_y     = 6   # top/bottom inset for content
 row_padding_y = 6   # extra vertical space per item row
+
+opacity = 1.0       # 0.0..1.0 — needs a running compositor

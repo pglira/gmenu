@@ -96,13 +96,14 @@ fn main() -> Result<()> {
     let cfg = Config::load()?;
     let width = cfg.width();
     let height = cfg.height();
+    let opacity = cfg.opacity();
     let theme = cfg.into_theme(cli.prompt.clone())?;
 
     let raw = read_stdin_lines()?;
     let items = Items::new(raw, cli.case_sensitive);
     let mut app = App::new(items, cli.max_matches, cli.case_sensitive);
 
-    let win = Window::open(width, height, theme.bg.pixel())?;
+    let win = Window::open(width, height, theme.bg.pixel(), opacity)?;
     let mut renderer = Renderer::new(width as i32, height as i32, &theme);
     let keymap = Keymap::fetch(&win.conn)?;
 
