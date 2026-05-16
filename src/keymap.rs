@@ -47,26 +47,34 @@ impl Keymap {
     }
 
     pub fn lookup(&self, keycode: u8, state: u16) -> Key {
-        if keycode < self.min_keycode { return Key::Other; }
-        let idx = (keycode - self.min_keycode) as usize * self.keysyms_per_keycode as usize;
-        if idx >= self.table.len() { return Key::Other; }
-        let group_size = self.keysyms_per_keycode.min(4) as usize;
-        // Column 0 = unshifted, 1 = shifted (group 1)
+        let per = self.keysyms_per_keycode as usize;
+        if per == 0 || keycode < self.min_keycode { return Key::Other; }
+        let start = (keycode - self.min_keycode) as usize * per;
+        let row = match self.table.get(start..start + per) {
+            Some(r) => r,
+            None => return Key::Other,
+        };
+
+        // ISO_Level3_Shift (AltGr) is conventionally bound to Mod5 on X11.
         let shift = (state & u16::from(KeyButMask::SHIFT)) != 0;
         let lock = (state & u16::from(KeyButMask::LOCK)) != 0;
-        let col = if shift ^ (lock && self.is_letter_keycode(keycode)) { 1 } else { 0 };
-        let col = col.min(group_size.saturating_sub(1));
-        let sym = self.table[idx + col];
-        let sym0 = self.table[idx];
-        let sym = if sym == 0 { sym0 } else { sym };
-        keysym_to_key(sym)
-    }
+        let altgr = (state & u16::from(KeyButMask::MOD5)) != 0;
+        let is_letter = (0x61..=0x7a).contains(&row[0]); // lowercase ascii at base
+        let effective_shift = shift ^ (lock && is_letter);
 
-    fn is_letter_keycode(&self, keycode: u8) -> bool {
-        let idx = (keycode - self.min_keycode) as usize * self.keysyms_per_keycode as usize;
-        if idx >= self.table.len() { return false; }
-        let s = self.table[idx];
-        (0x61..=0x7a).contains(&s) // lowercase ascii unshifted
+        // XKB on X11 typically reports keysyms_per_keycode of 6+ with level 3
+        // (AltGr) at cols 4/5; minimal mappings pack it at 2/3.
+        let altgr_base = if per >= 6 { 4 } else { 2 };
+        let col = match (altgr, effective_shift) {
+            (false, false) => 0,
+            (false, true)  => 1,
+            (true,  false) => altgr_base,
+            (true,  true)  => altgr_base + 1,
+        };
+        let sym = row.get(col).copied().filter(|&s| s != 0)
+            .or_else(|| if effective_shift { row.get(1).copied().filter(|&s| s != 0) } else { None })
+            .unwrap_or(row[0]);
+        keysym_to_key(sym)
     }
 }
 
