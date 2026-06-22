@@ -37,9 +37,13 @@ struct Cli {
 }
 
 fn read_stdin_lines() -> Result<Vec<String>> {
-    let mut buf = String::new();
-    std::io::stdin().lock().read_to_string(&mut buf)?;
-    Ok(buf.lines().map(|s| s.to_string()).collect())
+    // Read raw bytes and decode lossily: clipboard managers and other
+    // producers may feed entries that aren't valid UTF-8, and a single bad
+    // byte must not sink the whole menu. Invalid sequences become U+FFFD.
+    let mut buf = Vec::new();
+    std::io::stdin().lock().read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    Ok(text.lines().map(|s| s.to_string()).collect())
 }
 
 struct App {
